@@ -115,7 +115,7 @@ class DataLoader(object):
 
     def __next__(self, n=None):
         """ n is the number of examples to fetch """
-        if n is None: n = self.batch_size
+        if n is None: n = min( self.batch_size, self.data.shape[0] - self.p)
 
         # on first iteration lazily permute all data
         if self.p == 0 and self.shuffle:
@@ -123,13 +123,13 @@ class DataLoader(object):
             self.data = self.data[inds]
 
         # on last iteration reset the counter and raise StopIteration
-        if self.p + n > self.data.shape[0]:
+        if self.p >= self.data.shape[0]:
             self.reset() # reset for next time we get called
             raise StopIteration
 
         # on intermediate iterations fetch the next batch
         x = self.data[self.p : self.p + n]
-        self.p += self.batch_size
+        self.p += n
 
         return x
 
