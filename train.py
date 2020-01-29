@@ -14,7 +14,6 @@ import time
 
 import numpy as np
 import tensorflow as tf
-
 from pixel_cnn_pp import nn
 from pixel_cnn_pp.model import model_spec
 from utils import plotting
@@ -22,6 +21,7 @@ from utils import plotting
 # -----------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
 # data I/O
+parser.add_argument('-dp', '--data_protocol', type=int, default=1, help='protocol for train/test partitioning.')
 parser.add_argument('-i', '--data_dir', type=str, default='/local_home/tim/pxpp/data', help='Location for the dataset')
 parser.add_argument('-o', '--save_dir', type=str, default='/local_home/tim/pxpp/save', help='Location for parameter checkpoints and samples')
 parser.add_argument('-d', '--data_set', type=str, default='cifar', help='Can be either cifar|imagenet')
@@ -68,17 +68,68 @@ if args.data_set == 'imagenet' and args.class_conditional:
 if args.data_set == 'cifar':
     import data.cifar10_data as cifar10_data
     DataLoader = cifar10_data.DataLoader
+    load_data_function = cifar10_data.load
 elif args.data_set == 'imagenet':
     import data.imagenet_data as imagenet_data
     DataLoader = imagenet_data.DataLoader
+    load_data_function = imagenet_data.load
 else:
     raise("unsupported dataset")
 normal_class = args.normal_class if args.normal_class != -1 else None
-train_data = DataLoader(args.data_dir, 'train', args.batch_size * args.nr_gpu, rng=rng, shuffle=True, return_labels=args.class_conditional, selected_classes=[normal_class])
+
 if normal_class is None:
-    test_data = DataLoader(args.data_dir, 'test', args.batch_size * args.nr_gpu, shuffle=False, return_labels=args.class_conditional, selected_classes=None)
-else:
-    test_data, test_labels = DataLoader(args.data_dir, 'test', args.batch_size * args.nr_gpu, shuffle=False, return_labels=True, selected_classes=None)
+    train_data = DataLoader(args.data_dir, 'train', args.batch_size * args.nr_gpu, rng=rng, shuffle=True, return_labels=args.class_conditional)
+    validation_data = DataLoader(args.data_dir, 'test', args.batch_size * args.nr_gpu, shuffle=False, return_labels=args.class_conditional)
+elif args.data_protocol == 1:
+    x_1, y_1 = load_data_function(args.data_dir, 'train')
+    x_2, y_2 = load_data_function(args.data_dir, 'test')
+    inds = rng.permutation(x_1.shape[0] + x_2.shape[0])
+    x = np.concatenate([x_1, x_2], axis=0)[inds]
+    y = np.concatenate([y_1, y_2], axis=0)[inds]
+
+    inds_normal = np.where(y == normal_class)[0]
+    inds_anomaly = np.where(y != normal_class)[0]
+
+    n_normal_total = inds_normal.size
+    n_train_and_validation = int(n_normal_total * 0.8)
+    half_n_test = n_normal_total - n_train_and_validation
+    n_train = int(n_train_and_validation * 0.8)
+    n_validation = n_train_and_validation - n_train
+
+    train_data_array = x[inds_normal][:n_train]
+    labels_train_array = y[inds_normal][:n_train]
+    validation_data_array = x[inds_normal][n_train:n_train+n_validation]
+    labels_validation_array = y[inds_normal][n_train:n_train+n_validation]
+    test_data_array = np.concatenate( [ x[inds_normal][n_train+n_validation:], x[inds_anomaly][:half_n_test] ], axis=0 )
+    labels_test_array = np.concatenate( [ y[inds_normal][n_train+n_validation:], y[inds_anomaly][:half_n_test] ] )
+
+    train_data = DataLoader(batch_size=args.batch_size * args.nr_gpu, data=train_data_array, labels=labels_train_array, rng=rng, shuffle=True)
+    validation_data = DataLoader(batch_size=args.batch_size * args.nr_gpu, data=validation_data_array, labels=labels_validation_array, rng=rng, shuffle=False)
+    test_data = DataLoader(batch_size=args.batch_size * args.nr_gpu, data=test_data_array, labels=labels_test_array, rng=rng, shuffle=False)
+
+elif args.data_protocol == 2:
+    x_1, y_1 = load_data_function(args.data_dir, 'train')
+    x_2, y_2 = load_data_function(args.data_dir, 'test')
+    inds_normal_1 = np.where(y_1 == normal_class)[0]
+    x_1 = x_1[inds_normal_1]
+    y_1 = y_1[inds_normal_1]
+    n_train_and_validation = inds_normal_1.size
+    n_train = int(n_train_and_validation * 0.8)
+    n_validation = n_train_and_validation - n_train
+    inds = rng.permutation(n_train_and_validation)
+    x_1 = x_1[inds]
+    y_1 = y_1[inds]
+
+    train_data_array = x_1[:n_train]
+    labels_train_array = y_1[:n_train]
+    validation_data_array = x_1[n_train:]
+    labels_validation_array = y_1[n_train:]
+    test_data_array = x_2
+    labels_test_array = y_2
+
+    train_data = DataLoader(batch_size=args.batch_size * args.nr_gpu, data=train_data_array, labels=labels_train_array, rng=rng, shuffle=True)
+    validation_data = DataLoader(batch_size=args.batch_size * args.nr_gpu, data=validation_data_array, labels=labels_validation_array, rng=rng, shuffle=False)
+    test_data = DataLoader(batch_size=args.batch_size * args.nr_gpu, data=test_data_array, labels=labels_test_array, rng=rng, shuffle=False)
 
 obs_shape = train_data.get_observation_size() # e.g. a tuple (32,32,3)
 assert len(obs_shape) == 3, 'assumed right now'
@@ -191,10 +242,11 @@ def make_feed_dict(data, init=False):
 # //////////// perform training //////////////
 if not os.path.exists(args.save_dir):
     os.makedirs(args.save_dir)
-test_bpd = []
+validation_bpd = []
 lr = args.learning_rate
 with tf.Session() as sess:
     for epoch in range(args.max_epochs):
+        print('epoch: ', epoch)
         begin = time.time()
 
         # init
@@ -223,16 +275,16 @@ with tf.Session() as sess:
         train_loss_gen = np.mean(train_losses)
 
         # compute likelihood over test data
-        test_losses = []
-        for d in test_data:
+        validation_losses = []
+        for d in validation_data:
             feed_dict = make_feed_dict(d)
             l = sess.run(bits_per_dim_test, feed_dict)
-            test_losses.append(l)
-        test_loss_gen = np.mean(test_losses)
-        test_bpd.append(test_loss_gen)
+            validation_losses.append(l)
+        validation_loss_gen = np.mean(validation_losses)
+        validation_bpd.append(validation_loss_gen)
 
         # log progress to console
-        print("Iteration %d, time = %ds, train bits_per_dim = %.4f, test bits_per_dim = %.4f" % (epoch, time.time()-begin, train_loss_gen, test_loss_gen))
+        print("Iteration %d, time = %ds, train bits_per_dim = %.4f, validation bits_per_dim = %.4f" % (epoch, time.time()-begin, train_loss_gen, validation_loss_gen))
         sys.stdout.flush()
 
         if epoch % args.save_interval == 0:
@@ -250,4 +302,17 @@ with tf.Session() as sess:
 
             # save params
             saver.save(sess, args.save_dir + '/params_' + args.data_set + '.ckpt')
-            np.savez(args.save_dir + '/test_bpd_' + args.data_set + '.npz', test_bpd=np.array(test_bpd))
+            np.savez(args.save_dir + '/validation_bpd_' + args.data_set + '.npz', validation_bpd=np.array(validation_bpd))
+
+
+    # compute likelihood over test data
+    test_losses = []
+    for d in test_data:
+        feed_dict = make_feed_dict(d)
+        l = sess.run(bits_per_dim_test, feed_dict)
+        test_losses.append(l)
+    # test_loss_gen = np.mean(validation_losses)
+    # test_bpd.append(validation_loss_gen)
+
+    print(type(test_losses))
+    print(test_losses.shape)
