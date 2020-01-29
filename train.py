@@ -17,6 +17,7 @@ import tensorflow as tf
 from pixel_cnn_pp import nn
 from pixel_cnn_pp.model import model_spec
 from utils import plotting
+from sklearn.metrics import roc_auc_score
 
 # -----------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
@@ -314,5 +315,8 @@ with tf.Session() as sess:
     # test_loss_gen = np.mean(validation_losses)
     # test_bpd.append(validation_loss_gen)
 
-    print(type(test_losses))
-    print(test_losses.shape)
+    ############### check if it neads to be mutiplied by -1
+    auroc = roc_auc_score( np.array(labels_test_array == normal_class, dtype=np.int), -1*test_losses)
+    print(auroc)
+    print(np.array(test_losses).shape)
+
